@@ -76,3 +76,6 @@
 *.swp
 Thumbs.db
 .DS_Store
+
+# Local Graphify knowledge graph output
+/graphify-out/
