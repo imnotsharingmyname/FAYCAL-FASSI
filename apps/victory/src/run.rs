@@ -84,6 +84,11 @@ pub fn run(
         let cache = cfg.cache_subdir(&format!("images/fsr-{}-4k-sdr", preset.name()))?;
         victory_loader::load(&prepared, &cache)?
     } else {
+        if let Some(dir) = cfg.fidelityfx_dir.as_deref()
+            && let Err(why) = victory_hle::modules::fidelityfx::use_host_dir(dir)
+        {
+            tracing::warn!(folder = %dir.display(), "FidelityFX: {why}; the title's own DLLs run");
+        }
         victory_loader::load(&prepared, &images)?
     };
     // The program is mapped from the copy `load` wrote: the file's bytes

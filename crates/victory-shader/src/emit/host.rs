@@ -170,7 +170,11 @@ fn an_explicit_adapter_matches_an_index_or_name() {
 impl Host {
     /// The preferred hardware adapter, or WARP with `warp` (or `VICTORY_WARP=1`).
     pub fn new(warp: bool) -> Result<Self, String> {
-        let warp = warp || std::env::var("VICTORY_WARP").is_ok_and(|v| v == "1");
+        let force_warp = std::env::var("VICTORY_WARP").is_ok_and(|v| v == "1");
+        if cfg!(test) && !warp && force_warp {
+            return Err("VICTORY_WARP=1 skips the hardware adapter in tests".to_owned());
+        }
+        let warp = warp || force_warp;
         // SAFETY: plain D3D12/DXGI calls with valid out pointers.
         unsafe {
             // `VICTORY_D3D12_DEBUG`: the debug layer, whose messages a

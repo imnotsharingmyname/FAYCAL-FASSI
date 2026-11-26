@@ -150,11 +150,11 @@ pub fn loop_limit() -> u32 {
 }
 
 /// Whether a pixel shader's helper lane reads its own value where the console reads the first
-/// lane's (`lower.rs` `first_lane`); on unless `VICTORY_HELPER_OWN=0`. Part of the translation:
-/// the shader cache keys on it.
+/// lane's (`lower.rs` `first_lane`); off by default on narrow-wave hosts (causes contour banding
+/// on GeForce RTX unless `VICTORY_HELPER_OWN=1`). Part of the translation: the shader cache keys on it.
 pub fn helper_own() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_HELPER_OWN").is_none_or(|v| v != "0"))
+    *ON.get_or_init(|| std::env::var_os("VICTORY_HELPER_OWN").is_some_and(|v| v == "1"))
 }
 
 /// Which of a translated program's group barriers wait for the whole

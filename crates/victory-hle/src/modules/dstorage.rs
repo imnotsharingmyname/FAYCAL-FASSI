@@ -320,9 +320,23 @@ struct Files {
     io: Io,
 }
 
+fn worker_count() -> usize {
+    static COUNT: OnceLock<usize> = OnceLock::new();
+    *COUNT.get_or_init(|| {
+        std::env::var("VICTORY_DSTORAGE_WORKERS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map_or(4, |n| (n.get() / 2).clamp(2, 8))
+            })
+    })
+}
+
 impl Files {
     fn new(first: std::fs::File, io: Io) -> Files {
-        let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let workers = worker_count();
         let others = match io {
             Io::One => 0,
             Io::Overlapped => 1,
@@ -628,12 +642,21 @@ fn scheduler() -> Option<&'static Scheduler> {
         })
         .as_ref()?;
     STARTED.call_once(|| {
-        let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let workers = worker_count();
         let started = (0..workers)
             .filter(|i| {
                 std::thread::Builder::new()
                     .name(format!("dstorage {i}"))
-                    .spawn(|| work(scheduler))
+                    .spawn(|| {
+                        // SAFETY: valid pseudo-handle for current worker thread.
+                        unsafe {
+                            use windows_sys::Win32::System::Threading::{
+                                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+                            };
+                            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                        }
+                        work(scheduler);
+                    })
                     .is_ok()
             })
             .count();

@@ -582,11 +582,18 @@ pub(crate) fn pipeline(
 /// last save and `SAVE_EVERY` has passed (or `now`).
 pub(crate) fn save(now: bool) {
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-    const SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
+    let interval = if crate::residency::limited_host_ram() {
+        std::time::Duration::from_secs(90)
+    } else {
+        std::time::Duration::from_secs(20)
+    };
+    if !now && crate::residency::pressured() {
+        return;
+    }
     let (Some(dir), Some(library)) = (DIR.get(), library()) else { return };
     {
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        if !now && last.is_some_and(|t| t.elapsed() < SAVE_EVERY) {
+        if !now && last.is_some_and(|t| t.elapsed() < interval) {
             return;
         }
         *last = Some(std::time::Instant::now());
