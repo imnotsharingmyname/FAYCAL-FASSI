@@ -6804,9 +6804,9 @@ impl<'a> Lower<'a> {
             let raw = self.end_guarded(at, &raw);
             let other = self.s.m.cmp(self.cur, pred::EQ, stride, zero);
             let at = self.begin_guarded(Some(other));
-            // (Renderer port 5: the twin of a constant buffer's slot is a
-            // raw view of its bytes, read as one.)
-            let as_raw = super::shader::constants_raw() && super::shader::raw_views() != 0;
+            // (Renderer port 5: constant buffer slot or its raw twin is a raw
+            // view of its bytes, read as one.)
+            let as_raw = super::shader::constants_raw();
             let h = if as_raw {
                 self.handle(site, src, false, (11, 0))?
             } else {
@@ -7412,9 +7412,6 @@ impl<'a> Lower<'a> {
             if rp.root == RootType::Descriptor && matches!(kind, Some(ResourceType::Cbv) | None) {
                 return Ok(Some(self.s.root_srv_handle(rp.slot)));
             }
-            return Ok(None);
-        }
-        if super::shader::raw_views() == 0 {
             return Ok(None);
         }
         let x = self.x;

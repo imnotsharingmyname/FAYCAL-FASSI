@@ -3055,9 +3055,36 @@ impl HostHeap {
         static HOLDS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let holds = *HOLDS.get_or_init(|| std::env::var_os("VICTORY_SLOT_HOLDS").is_none_or(|v| v != "0"));
         let Some(host) = host() else { return };
+        let bytes_aligned = constant_bytes(size);
+        if crate::port_cbv::on() && self.twins.is_empty() {
+            if bytes_aligned == 0 {
+                null_buffer_view(self.at(index));
+            } else {
+                // SAFETY: a live buffer that holds the range.
+                let first = (gpu - unsafe { buffer.GetGPUVirtualAddress() }) / 4;
+                let raw = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                    Format: DXGI_FORMAT_R32_TYPELESS,
+                    ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+                    Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                    Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                        Buffer: D3D12_BUFFER_SRV {
+                            FirstElement: first,
+                            NumElements: bytes_aligned / 4,
+                            StructureByteStride: 0,
+                            Flags: D3D12_BUFFER_SRV_FLAG_RAW,
+                        },
+                    },
+                };
+                // SAFETY: slot of our heap; range lies in live buffer.
+                unsafe { host.device.CreateShaderResourceView(buffer, Some(&raw), self.at(index)) };
+            }
+            self.put(index);
+            self.keep(index, holds.then(|| buffer.clone()));
+            return;
+        }
         let desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {
             BufferLocation: gpu,
-            SizeInBytes: constant_bytes(size),
+            SizeInBytes: bytes_aligned,
         };
         // SAFETY: a slot of our heap; the memory is the caller's.
         unsafe {
@@ -3101,7 +3128,10 @@ impl HostHeap {
     /// bytes as before).
     pub(crate) fn constant_raw_at(&self, index: u32, buffer: &ID3D12Resource, gpu: u64, size: u32) -> bool {
         let Some(host) = host() else { return false };
-        let Some(twin) = self.twin(index) else { return false };
+        let twin = self.twin(index);
+        if twin.is_none() && !self.twins.is_empty() {
+            return false;
+        }
         // SAFETY: a live buffer.
         let (base, width) = unsafe { (buffer.GetGPUVirtualAddress(), buffer.GetDesc().Width) };
         let Some(offset) = gpu.checked_sub(base).filter(|&o| o < width && crate::port_cbv::raw_ok(o)) else {
@@ -3124,19 +3154,27 @@ impl HostHeap {
                 },
             },
         };
-        let cbv = D3D12_CONSTANT_BUFFER_VIEW_DESC {
-            BufferLocation: if gpu.is_multiple_of(256) { gpu } else { 0 },
-            SizeInBytes: if gpu.is_multiple_of(256) { constant_bytes(size).min(((width - offset) & !255) as u32) } else { 0 },
-        };
-        let cbv = if cbv.SizeInBytes == 0 { D3D12_CONSTANT_BUFFER_VIEW_DESC::default() } else { cbv };
-        // SAFETY: slots of our heaps; the ranges lie in the live buffer (a
-        // zero location makes a null constant buffer view).
-        unsafe {
-            host.device.CreateConstantBufferView(Some(&cbv), self.at(index));
-            self.put(index);
-            host.device.CreateShaderResourceView(buffer, Some(&raw), twin);
+        if let Some(twin) = twin {
+            let cbv = D3D12_CONSTANT_BUFFER_VIEW_DESC {
+                BufferLocation: if gpu.is_multiple_of(256) { gpu } else { 0 },
+                SizeInBytes: if gpu.is_multiple_of(256) { constant_bytes(size).min(((width - offset) & !255) as u32) } else { 0 },
+            };
+            let cbv = if cbv.SizeInBytes == 0 { D3D12_CONSTANT_BUFFER_VIEW_DESC::default() } else { cbv };
+            // SAFETY: slots of our heaps; the ranges lie in the live buffer.
+            unsafe {
+                host.device.CreateConstantBufferView(Some(&cbv), self.at(index));
+                self.put(index);
+                host.device.CreateShaderResourceView(buffer, Some(&raw), twin);
+            }
+            self.twin_made(index, true);
+        } else {
+            // 1M-view host (e.g. GeForce RTX): shaders read slot `index` directly as a raw SRV.
+            unsafe {
+                host.device.CreateShaderResourceView(buffer, Some(&raw), self.at(index));
+                self.put(index);
+            }
+            crate::port_cbv::twinned();
         }
-        self.twin_made(index, true);
         self.keep(index, Some(buffer.clone()));
         true
     }
@@ -4269,23 +4307,33 @@ fn constant_twinned(
         D3D12_CONSTANT_BUFFER_VIEW_DESC::default()
     };
     let bytes = u64::from(constant_bytes(size)).min(room) & !3;
+    let raw = D3D12_SHADER_RESOURCE_VIEW_DESC {
+        Format: DXGI_FORMAT_R32_TYPELESS,
+        ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+        Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+        Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+            Buffer: D3D12_BUFFER_SRV {
+                FirstElement: offset / 4,
+                NumElements: (bytes / 4) as u32,
+                StructureByteStride: 0,
+                Flags: D3D12_BUFFER_SRV_FLAG_RAW,
+            },
+        },
+    };
+    if twin.is_none() && victory_shader::emit::raw_views() == 0 {
+        if bytes == 0 {
+            null_buffer_view(at);
+        } else {
+            // SAFETY: slot of our heap; range lies in live buffer.
+            unsafe { host.device.CreateShaderResourceView(buffer, Some(&raw), at) };
+        }
+        crate::port_cbv::twinned();
+        return true;
+    }
     // SAFETY: slots of our heaps; the ranges lie in the live buffer.
     unsafe {
         host.device.CreateConstantBufferView(Some(&cbv), at);
         if let Some(twin) = twin {
-            let raw = D3D12_SHADER_RESOURCE_VIEW_DESC {
-                Format: DXGI_FORMAT_R32_TYPELESS,
-                ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
-                Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
-                    Buffer: D3D12_BUFFER_SRV {
-                        FirstElement: offset / 4,
-                        NumElements: (bytes / 4) as u32,
-                        StructureByteStride: 0,
-                        Flags: D3D12_BUFFER_SRV_FLAG_RAW,
-                    },
-                },
-            };
             if bytes == 0 {
                 null_buffer_view(twin);
             } else {
@@ -4959,6 +5007,9 @@ fn null_for(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) {
             return null_like(desc[..10].try_into().unwrap_or(&[0; 10]), at);
         }
         View::Constant(..) => {
+            if crate::port_cbv::on() && victory_shader::emit::raw_views() == 0 {
+                return null_buffer_view(at);
+            }
             let desc = D3D12_CONSTANT_BUFFER_VIEW_DESC::default();
             // SAFETY: a slot of our heap; a zero location makes a null view.
             return unsafe { host.device.CreateConstantBufferView(Some(&desc), at) };

@@ -3634,7 +3634,7 @@ impl State {
                             }
                         }
                         let Some((buffer, gpu, to)) = list.scratch_held(u64::from(size)) else {
-                            host.make_null(index);
+                            host.make_at(index, &View::Constant(0, 0));
                             continue;
                         };
                         let slot = (std::ptr::from_ref(heap) as usize, index);
