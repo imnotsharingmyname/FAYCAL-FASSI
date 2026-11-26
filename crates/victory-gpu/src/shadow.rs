@@ -5669,9 +5669,10 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
 static EXACT: Mutex<(
     u64,
     u64,
+    u64,
     BTreeMap<(u64, u64), (Arc<Shadow>, u64)>,
     BTreeMap<u64, std::collections::VecDeque<(u64, ID3D12Resource, usize, u64)>>,
-)> = Mutex::new((0, 0, BTreeMap::new(), BTreeMap::new()));
+)> = Mutex::new((0, 0, 0, BTreeMap::new(), BTreeMap::new()));
 
 /// Since the last frame line: askings for such copies, copies made, and
 /// backing buffers recycled from `EXACT`'s pool.
@@ -5689,10 +5690,9 @@ fn exact_bucket_cap(len: u64) -> u64 {
 /// `address` itself: for a buffer view whose bytes do not start on an
 /// element of the copy its buffer has (`descriptor/host.rs` `view_home`).
 pub(crate) fn exact(address: u64, len: u64) -> Option<Arc<Shadow>> {
-    const MANY: usize = 2048;
-    const LATELY: u64 = 4096;
+    const MANY: usize = 4096;
+    const LATELY: u64 = 6144;
     const SWEEP_STRIDE: u64 = 1024;
-    const BUCKET_MAX: usize = 512;
     const MOST: u64 = 64 << 20;
     if len == 0 || len > MOST || !address.is_multiple_of(4) {
         return None;
@@ -5701,7 +5701,7 @@ pub(crate) fn exact(address: u64, len: u64) -> Option<Arc<Shadow>> {
     let cap = exact_bucket_cap(len);
     let reused = {
         let mut guard = EXACT.lock().unwrap_or_else(|e| e.into_inner());
-        let (tick, next_sweep, map, pool) = &mut *guard;
+        let (tick, next_sweep, pooled_bytes, map, pool) = &mut *guard;
         *tick += 1;
         let now = *tick;
         if let Some((shadow, used)) = map.get_mut(&(address, len)) {
@@ -5713,32 +5713,57 @@ pub(crate) fn exact(address: u64, len: u64) -> Option<Arc<Shadow>> {
             *next_sweep = now + SWEEP_STRIDE;
             let (started, _) = crate::host::submissions();
             let ready_after = started + crate::queue::queued() + 8;
-            let pressured = crate::residency::pressured();
+            let (pool_byte_cap, bucket_max): (u64, usize) = if crate::residency::critical_commit() {
+                (16 << 20, 128)
+            } else if crate::residency::pressured() {
+                (32 << 20, 256)
+            } else {
+                (64 << 20, 512)
+            };
+            while *pooled_bytes > pool_byte_cap {
+                let Some((&largest_cap, _)) = pool.iter().rev().find(|(_, q)| !q.is_empty()) else {
+                    *pooled_bytes = 0;
+                    break;
+                };
+                if let Some(q) = pool.get_mut(&largest_cap)
+                    && q.pop_front().is_some()
+                {
+                    *pooled_bytes = pooled_bytes.saturating_sub(largest_cap);
+                }
+            }
             map.retain(|_, (shadow, used)| {
                 let keep = Arc::strong_count(shadow) > 1
                     || crate::host::references(&shadow.buffer) > 1
                     || *used + LATELY > now;
-                if !keep && !pressured {
+                if !keep {
                     let bcap = exact_bucket_cap(shadow.len);
-                    let q = pool.entry(bcap).or_default();
-                    if q.len() < BUCKET_MAX {
-                        q.push_back((
-                            ready_after,
-                            shadow.buffer.clone(),
-                            shadow.data as usize,
-                            shadow.gpu,
-                        ));
+                    if *pooled_bytes + bcap <= pool_byte_cap {
+                        let q = pool.entry(bcap).or_default();
+                        if q.len() < bucket_max {
+                            q.push_back((
+                                ready_after,
+                                shadow.buffer.clone(),
+                                shadow.data as usize,
+                                shadow.gpu,
+                            ));
+                            *pooled_bytes += bcap;
+                        }
                     }
                 }
                 keep
             });
         }
         let finished = crate::host::submissions().1;
-        pool.get_mut(&cap)
+        let popped = pool
+            .get_mut(&cap)
             .and_then(|q| {
                 (q.front().is_some_and(|&(ready, ..)| ready <= finished)).then(|| q.pop_front())
             })
-            .flatten()
+            .flatten();
+        if popped.is_some() {
+            *pooled_bytes = pooled_bytes.saturating_sub(cap);
+        }
+        popped
     };
     let (buffer, data, gpu, fresh_alloc) = match reused {
         Some((_, buffer, data, gpu)) => {
@@ -5755,7 +5780,7 @@ pub(crate) fn exact(address: u64, len: u64) -> Option<Arc<Shadow>> {
     };
     let shadow = Arc::new(Shadow::new(buffer, data, gpu, address, len));
     let mut guard = EXACT.lock().unwrap_or_else(|e| e.into_inner());
-    let (tick, _, map, _) = &mut *guard;
+    let (tick, _, _, map, _) = &mut *guard;
     *tick += 1;
     let now = *tick;
     if let Some((existing, used)) = map.get_mut(&(address, len)) {
@@ -5785,7 +5810,7 @@ pub(crate) fn exact_line(frames: f64) {
     }
     let (kept, pooled) = {
         let g = EXACT.lock().unwrap_or_else(|e| e.into_inner());
-        (g.2.len(), g.3.values().map(|q| q.len()).sum::<usize>())
+        (g.3.len(), g.4.values().map(|q| q.len()).sum::<usize>())
     };
     tracing::info!(
         "buffer views off their copy's elements (they were refused and read zeros; VICTORY_VIEW_BYTES=0 refuses them again): \

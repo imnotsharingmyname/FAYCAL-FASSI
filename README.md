@@ -1,26 +1,36 @@
-# VIctory on an RX 7900 XTX
+# FAYCAL FASSI — VIctory High-FPS Runtime (RTX 5060 8 GB & AMD)
 
-A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
-that runs an Xbox Series title natively on Windows from files the user supplies.
+A fork of [VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD) and
+[VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
+that runs an Xbox Series title natively on Windows from files the user supplies,
+optimized for **60 real FPS** on **NVIDIA GeForce RTX 5060 (8 GB VRAM) + AMD Ryzen 5 5500 + 32 GB DDR4**.
 
 ## The goal
 
-**A stable 30 fps or more without ray tracing, then as high a frame rate and as
-low frame times as the PC allows**, on an AMD RX 7900 XTX first and on PCs with
-32 GB (later 16 GB) of RAM.
+**Reach 60 real FPS (`16.67 ms/frame`, no frame generation) without ray tracing**,
+respecting an **8 GB dedicated VRAM budget** and **32 GB system RAM**, while preserving
+visual fidelity and stability across NVIDIA Blackwell/Ada/Ampere and AMD RDNA GPUs.
 
 The way there is **porting, not emulating**: patching the title's renderer so it
 behaves the way a PC renderer does, rather than having the layer watch and copy
 the console's shared memory every frame. Shaders are translated ahead of time
 into a versioned store that is kept between builds. Ray tracing stays optional
-and off by default. The picture comes after the frame rate: texture pop-in and
-lighting that is too bright or too dark when walking indoors are next in line.
+and off by default.
 
 **This repository contains no game files, code or assets.** You need your own
 copy of the game. It is not affiliated with or endorsed by the game's developer
 or publisher.
 
-## Where it stands (2026-11-26)
+## FPS Benchmark Log — RTX 5060 8 GB + Ryzen 5 5500 + 32 GB DDR4 (`E:\GTA6`)
+
+All FPS numbers below are real measured hardware frames (no frame generation):
+
+| Run | Commit | Build & Profile | Menu / Video FPS | 3D World Steady-State FPS | Key Findings & Bottleneck Addressed |
+|---|---|---|---|---|---|
+| Upstream RTX baseline ([issue #333](https://github.com/Belobug/VIctory-Belobug-AMD/issues/333)) | `cd8dfc0` | `diag`, Series S | 30.0 fps | 1.8–1.9 fps (532–545 ms) | NVIDIA 1M view heap (`raw_twins=false`) caused 319 `CreateCommittedResource`/frame + disabled `PORT_CBV` |
+| `faycal-01` (cold PSO run) | `faaa890` | `diag` (`BelowNormal`), Series S + FSR 3.1.6, Patches 1,2,5,6,7 | **60.0 fps** (`16.7 ms`) | 2.8 fps (`363.0 ms`, `4318–5417` draws) | `PORT_CBV=1` read 13,207 CBVs/frame zero-copy on RTX; cold PSO compile (`500 ms/frame` wait, 762 queued) + 8 GB VRAM spillover (`7876 / 7042 MB`) + `EXACT` pool disabled under `pressured()` |
+
+## Reference RX 7900 XTX Measurements (2026-11-26)
 
 The measurements below come from one Windows 11 PC with an Intel i9-12900K,
 64 GB of system RAM and a Radeon RX 7900 XTX (24 GB of dedicated video memory).

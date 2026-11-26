@@ -38,19 +38,29 @@ const STAGING_KEPT: usize = 8;
 /// How many are kept now.
 static SPARES: AtomicUsize = AtomicUsize::new(SPARE);
 
+fn vram_spare_cap(memory: Option<[u64; 4]>) -> usize {
+    match memory {
+        Some([budget, ..]) if (1 << 30..=12 << 30).contains(&budget) => 4,
+        Some([budget, ..]) if budget <= 20 << 30 => 16,
+        _ => SPARE_KEPT,
+    }
+}
+
 /// Sets how many empty blocks stay, by the card's memory (budget and use):
-/// [`SPARE_KEPT`] below 85 % ([`crate::host::keep_freed`]), else [`SPARE`].
-/// Asked once a second.
+/// [`SPARE_KEPT`] below 85 % ([`crate::host::keep_freed`]), else [`SPARE`],
+/// capped by the adapter's local VRAM tier so 8–12 GB cards do not hold
+/// gigabytes of empty blocks. Asked once a second.
 pub(crate) fn room(memory: Option<[u64; 4]>) {
+    let cap = vram_spare_cap(memory);
     if !crate::residency::on() {
-        SPARES.store(spares(memory, crate::host::keep_freed()), Ordering::Relaxed);
+        SPARES.store(spares(memory, crate::host::keep_freed()).min(cap), Ordering::Relaxed);
         return;
     }
     // (`VICTORY_RESIDENCY=1`, codec-d/cool_fox c64fc9b4/e94d277a: fewer
     // spares while the system is short of memory, and idle blocks let go now,
     // not at the pool's next allocation.)
     let pressure = crate::residency::pressured();
-    let limit = spares(memory, crate::host::keep_freed() && !pressure);
+    let limit = spares(memory, crate::host::keep_freed() && !pressure).min(cap);
     SPARES.store(limit, Ordering::Relaxed);
     let tick = now();
     if let Ok(mut pool) = TEXTURES.try_lock() {
@@ -103,7 +113,16 @@ pub(crate) fn on() -> bool {
 /// no such lists: pieces are cut from those first.
 fn ahead() -> usize {
     static AHEAD: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *AHEAD.get_or_init(|| std::env::var("VICTORY_RIPE_BLOCKS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(12))
+    *AHEAD.get_or_init(|| {
+        if let Some(v) = std::env::var("VICTORY_RIPE_BLOCKS").ok().and_then(|v| v.trim().parse().ok()) {
+            return v;
+        }
+        match crate::host::host().and_then(|h| h.video_memory()) {
+            Some([budget, ..]) if budget <= 12 << 30 => 2,
+            Some([budget, ..]) if budget <= 20 << 30 => 6,
+            _ => 12,
+        }
+    })
 }
 
 /// Submissions begun and finished ([`crate::host::submissions`]), and how
@@ -348,6 +367,14 @@ impl<B: Clone> Pool<B> {
     fn blocks(&self) -> usize {
         self.blocks.iter().flatten().count()
     }
+
+    fn whole_empty_blocks(&self) -> usize {
+        self.blocks
+            .iter()
+            .flatten()
+            .filter(|b| b.free.whole(BLOCK))
+            .count()
+    }
 }
 
 /// A mapped upload buffer's memory.
@@ -370,6 +397,13 @@ static HELD: AtomicU64 = AtomicU64::new(0);
 /// by us that new textures take first.
 pub(crate) fn texture_room() -> u64 {
     (lock(&TEXTURES).blocks() as u64 * BLOCK).saturating_sub(HELD.load(Ordering::Relaxed))
+}
+
+/// Bytes of completely empty texture blocks that [`room`] can release back
+/// to the system for render targets and buffer copies (unlike fragmented
+/// holes inside partially-occupied blocks).
+pub(crate) fn spare_texture_bytes() -> u64 {
+    lock(&TEXTURES).whole_empty_blocks() as u64 * BLOCK
 }
 
 /// For the memory line: blocks of textures and of staging buffers, in MiB.

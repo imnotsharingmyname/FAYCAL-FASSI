@@ -1771,6 +1771,18 @@ fn texture_floor_bytes(vram_budget: Option<u64>) -> u64 {
 /// sets a limit on those copies' bytes instead). Past the budget the system moves the card's memory into the PC's,
 /// which ended runs 20 and 24.
 #[cfg(windows)]
+fn reclaimable_pool_bytes(budget: u64) -> u64 {
+    if budget <= 12 << 30 {
+        // Fragmented holes inside partially-filled 64 MiB texture blocks
+        // cannot hold render targets or card buffer copies; only whole empty
+        // blocks can be released back to the adapter's local budget.
+        crate::pool::spare_texture_bytes()
+    } else {
+        crate::pool::texture_room()
+    }
+}
+
+#[cfg(windows)]
 pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
     const WITHOUT_BUDGET: u64 = 4 << 30;
@@ -1795,8 +1807,10 @@ pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
         // world makes in its first frame ([`targets_room_kept`]) counts as
         // used.
         Some([budget, used, ..]) => {
-            used.saturating_sub(crate::pool::texture_room()) + crate::shadow::card_room_kept() + targets_room_kept()
-                < budget / 100 * room_percent()
+            used.saturating_sub(reclaimable_pool_bytes(budget))
+                + crate::shadow::card_room_kept()
+                + targets_room_kept()
+                < budget / 100 * room_percent(Some(budget))
         }
         None => filled < WITHOUT_BUDGET,
     }
@@ -1824,49 +1838,60 @@ pub(crate) fn targets_room_kept() -> u64 {
     use std::sync::atomic::Ordering::Relaxed;
     static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let most = *MOST.get_or_init(|| {
-        std::env::var("VICTORY_CARD_ROOM_FOR_TARGETS_MB")
+        if let Some(mb) = std::env::var("VICTORY_CARD_ROOM_FOR_TARGETS_MB")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
-            .map_or(3072 << 20, |mb| mb.min(8192) << 20)
+        {
+            return mb.min(8192) << 20;
+        }
+        let default_mb = match crate::host::host().and_then(|h| h.video_memory()) {
+            Some([budget, ..]) if budget <= 12 << 30 => 1920,
+            _ => 3072,
+        };
+        default_mb << 20
     });
     // Every host texture's bytes less those of the copies the title fills.
     let targets = HOST_TEXTURES[1].load(Relaxed).saturating_sub(KINDS[1].load(Relaxed));
     most.saturating_sub(targets)
 }
 
-/// [`room`] as it was at most a tenth of a second ago, for a question
+/// [`room`] as it was at most 25 ms ago, for a question
 /// asked of many textures a frame ([`room`] asks the system each time).
 #[cfg(windows)]
 pub(crate) fn room_lately() -> bool {
     use std::sync::atomic::Ordering::Relaxed;
-    // The tenth of a second of the last asking, counted from 1, and its
+    // The 25 ms tick of the last asking, counted from 1, and its
     // answer in the lowest bit.
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tenth = crate::host::now_ms() / 100 + 1;
+    let tick = crate::host::now_ms() / 25 + 1;
     let last = LAST.load(Relaxed);
-    if last >> 1 == tenth {
+    if last >> 1 == tick {
         return last & 1 != 0;
     }
     let room = room(crate::host::host().and_then(|h| h.video_memory()));
-    LAST.store((tenth << 1) | u64::from(room), Relaxed);
+    LAST.store((tick << 1) | u64::from(room), Relaxed);
     room
 }
 
 /// The share of the card's budget, in percent, up to which host copies of
-/// textures picked by index are made ([`room`]): 90 unless
-/// `VICTORY_TEXTURE_ROOM_PERCENT` says another (50 to 97). At 90 about a
-/// tenth of the budget, 1,020 MB of 10,200, stays unused while thousands of
-/// textures wait (runs 170-174); the card copies of title buffers from
-/// 1 MiB up take 449 MB more of the card than before (941 against 492),
-/// and 94 gives the textures about that much back.
+/// textures picked by index are made ([`room`]): 86 on `<= 12 GiB` cards
+/// (leaving room for driver allocations, upscaler and swapchain) and 90 on
+/// larger cards unless `VICTORY_TEXTURE_ROOM_PERCENT` says another (50 to 97).
 #[cfg(windows)]
-fn room_percent() -> u64 {
-    static PERCENT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *PERCENT.get_or_init(|| {
+fn room_percent(budget: Option<u64>) -> u64 {
+    static PERCENT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let explicit = *PERCENT.get_or_init(|| {
         std::env::var("VICTORY_TEXTURE_ROOM_PERCENT")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
-            .map_or(90, |percent| percent.clamp(50, 97))
+            .map(|percent| percent.clamp(50, 97))
+    });
+    explicit.unwrap_or_else(|| {
+        if budget.is_some_and(|b| b <= 12 << 30) {
+            86
+        } else {
+            90
+        }
     })
 }
 
@@ -2135,7 +2160,7 @@ pub(crate) fn let_go_idle() {
         .get_or_init(|| !matches!(std::env::var("VICTORY_TEXTURE_KEEP").as_deref(), Ok("0") | Ok("1")));
     let (idle_ms, most) = match memory {
         Some([budget, used, ..]) if keep => {
-            let used = used.saturating_sub(crate::pool::texture_room())
+            let used = used.saturating_sub(reclaimable_pool_bytes(budget))
                 + crate::shadow::card_room_kept()
                 + targets_room_kept();
             crate::host::vram_keep(budget, used)
