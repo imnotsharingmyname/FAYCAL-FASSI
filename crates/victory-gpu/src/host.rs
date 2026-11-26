@@ -9301,10 +9301,14 @@ impl Meter {
     fn record_present(&mut self, hwnd: HWND, status: windows::core::HRESULT) -> bool {
         use windows::Win32::Foundation::S_OK;
         if status != S_OK && status != self.last_present {
-            tracing::warn!(?status, "swap chain did not present the frame");
+            if status.is_ok() {
+                tracing::info!(?status, "swap chain presented with non-zero status (e.g. occluded); continuing frame meter");
+            } else {
+                tracing::warn!(?status, "swap chain did not present the frame");
+            }
         }
         self.last_present = status;
-        if status != S_OK {
+        if status.is_err() {
             return false;
         }
         self.frame(hwnd);
@@ -9921,7 +9925,7 @@ impl Host {
             let mut showing = crate::timeline::span("the host's Present");
             let status = p.swap_chain.Present(0, DXGI_PRESENT(0));
             showing.next("the frame meter");
-            if status == windows::Win32::Foundation::S_OK {
+            if status.is_ok() {
                 p.panel.frame(p.meter.line_due());
             }
             let presented = p.meter.record_present(p.hwnd, status);
