@@ -5679,20 +5679,19 @@ static EXACT: Mutex<(
 static EXACT_STATS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
 fn exact_bucket_cap(len: u64) -> u64 {
-    if len <= 65536 {
-        len.next_multiple_of(1024)
-    } else {
-        len.next_power_of_two()
-    }
+    // D3D12 committed buffers already allocate in 64 KiB pages, so unifying
+    // all <= 64 KiB off-element views into a single 64 KiB bucket wastes zero
+    // D3D12 heap space while maximizing cross-size recycling.
+    len.max(65536).next_power_of_two()
 }
 
 /// A copy of the title memory `[address, address + len)` that starts at
 /// `address` itself: for a buffer view whose bytes do not start on an
 /// element of the copy its buffer has (`descriptor/host.rs` `view_home`).
 pub(crate) fn exact(address: u64, len: u64) -> Option<Arc<Shadow>> {
-    const MANY: usize = 4096;
-    const LATELY: u64 = 6144;
-    const SWEEP_STRIDE: u64 = 1024;
+    const MANY: usize = 1024;
+    const LATELY: u64 = 2500;
+    const SWEEP_STRIDE: u64 = 256;
     const MOST: u64 = 64 << 20;
     if len == 0 || len > MOST || !address.is_multiple_of(4) {
         return None;
@@ -5712,13 +5711,13 @@ pub(crate) fn exact(address: u64, len: u64) -> Option<Arc<Shadow>> {
         if now >= *next_sweep && map.len() >= MANY {
             *next_sweep = now + SWEEP_STRIDE;
             let (started, _) = crate::host::submissions();
-            let ready_after = started + crate::queue::queued() + 8;
+            let ready_after = started + crate::queue::queued() + 2;
             let (pool_byte_cap, bucket_max): (u64, usize) = if crate::residency::critical_commit() {
-                (16 << 20, 128)
+                (32 << 20, 512)
             } else if crate::residency::pressured() {
-                (32 << 20, 256)
+                (96 << 20, 1536)
             } else {
-                (64 << 20, 512)
+                (128 << 20, 2048)
             };
             while *pooled_bytes > pool_byte_cap {
                 let Some((&largest_cap, _)) = pool.iter().rev().find(|(_, q)| !q.is_empty()) else {

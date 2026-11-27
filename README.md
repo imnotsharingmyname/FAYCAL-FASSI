@@ -29,6 +29,7 @@ All FPS numbers below are real measured hardware frames (no frame generation):
 |---|---|---|---|---|---|
 | Upstream RTX baseline ([issue #333](https://github.com/Belobug/VIctory-Belobug-AMD/issues/333)) | `cd8dfc0` | `diag`, Series S | 30.0 fps | 1.8–1.9 fps (532–545 ms) | NVIDIA 1M view heap (`raw_twins=false`) caused 319 `CreateCommittedResource`/frame + disabled `PORT_CBV` |
 | `faycal-01` (cold PSO run) | `faaa890` | `diag` (`BelowNormal`), Series S + FSR 3.1.6, Patches 1,2,5,6,7 | **60.0 fps** (`16.7 ms`) | 2.8 fps (`363.0 ms`, `4318–5417` draws) | `PORT_CBV=1` read 13,207 CBVs/frame zero-copy on RTX; cold PSO compile (`500 ms/frame` wait, 762 queued) + 8 GB VRAM spillover (`7876 / 7042 MB`) + `EXACT` pool disabled under `pressured()` |
+| `faycal-02` (8 GB VRAM fix) | `957166f` | `diag`, Series S + FSR 3.1.6, Patches 1,2,5,6,7 | **60.0 fps** (`16.7 ms`) | **4.8 fps** (`210.3 ms`, `preparing: 35.4 ms`, `VRAM: 5883 / 7036 MB`, `RAM: 19.35 GB`) | Dedicated VRAM dropped `-2.0 GB` inside budget (`0.0 ms` CPU snapshots); exposed `122.3 ms/frame` `BEHIND_PLACED` flight wait (`VICTORY_PLACED_ORDER`) + sub-64KiB `EXACT` bucket misses |
 
 ## Reference RX 7900 XTX Measurements (2026-11-26)
 
